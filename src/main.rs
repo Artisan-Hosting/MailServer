@@ -132,7 +132,7 @@ async fn process_emails(
         log!(LogLevel::Trace, "Cloned config: {}", config_clone);
 
         while i < email_vec.len() && iteration_count < rate_limit {
-            if current_time.duration_since(email_vec[i].received_at) > Duration::from_secs(20) {
+            if current_time.duration_since(email_vec[i].received_at) > Duration::from_secs(300) {
                 log!(
                     LogLevel::Info,
                     "Expired email discarding: {:?}",
