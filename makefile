@@ -32,10 +32,9 @@ logs:
 
 # Install the systemd service file and reload daemon
 service:
-	@echo "[Unit]
+	@echo -e "[Unit]
 Description=Mailing Server Application
-After=network.target
-
+After=network.target \n
 [Service]
 Type=simple
 ExecStart=$(INSTALL_DIR)/$(BINARY_NAME)
@@ -45,8 +44,7 @@ Group=ais
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:$(LOG_DIR)/$(BINARY_NAME).log
-StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err
-
+StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err\n
 [Install]
 WantedBy=multi-user.target" > $(BINARY_NAME).service
 
