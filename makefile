@@ -32,9 +32,11 @@ logs:
 
 # Install the systemd service file and reload daemon
 service:
-	@echo -e "[Unit]
+	@cat << EOF > $(BINARY_NAME).service
+[Unit]
 Description=Mailing Server Application
-After=network.target \n
+After=network.target
+
 [Service]
 Type=simple
 ExecStart=$(INSTALL_DIR)/$(BINARY_NAME)
@@ -44,14 +46,15 @@ Group=ais
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:$(LOG_DIR)/$(BINARY_NAME).log
-StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err\n
+StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err
+
 [Install]
-WantedBy=multi-user.target" > $(BINARY_NAME).service
+WantedBy=multi-user.target
+EOF
 
 	install -m 644 $(BINARY_NAME).service $(SERVICE_FILE)
 	rm -f $(BINARY_NAME).service
-	systemctl daemon-reload
-	systemctl enable $(BINARY_NAME).service
+	systemctl daemon-reload && systemctl enable $(BINARY_NAME).service
 
 # Run the binary with the correct working directory and capture logs
 run:
@@ -63,4 +66,3 @@ clean:
 	rm -rf $(LOG_DIR) $(CONFIG_DIR) $(SERVICE_FILE)
 	systemctl disable $(BINARY_NAME).service || true
 	systemctl daemon-reload
-
