@@ -1,0 +1,11 @@
+[smtp]
+username = "ais_bot@artisanhosting.net"
+password = "&wvh\"x2)!62x93Cc-w"
+server = "mail.ramfield.net"
+port = 587
+to = "enlightened@artisanhosting.net"
+from = "ArtisanBot <ais_bot@artisanhosting.net>"
+
+[app]
+loop_interval_seconds = 5  # Interval for email processing loop
+rate_limit = 2              # Rate limit for email sending
