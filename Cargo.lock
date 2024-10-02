@@ -134,6 +134,8 @@ dependencies = [
 [[package]]
 name = "artisan_middleware"
 version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79537fc5d88836d09d4495757436d959a53b2af0de39611f605add636d14ea11"
 dependencies = [
  "chrono",
  "colored",
