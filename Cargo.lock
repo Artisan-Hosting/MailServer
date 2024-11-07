@@ -85,6 +85,8 @@ dependencies = [
 [[package]]
 name = "artisan_middleware"
 version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ccef63e81c4f5c5aa33c90b2c8e296960299d6584dcf59a848c9bcb7859d73"
 dependencies = [
  "bincode",
  "bitflags 2.6.0",
