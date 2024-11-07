@@ -1,5 +1,5 @@
 [package]
-name = "mailing_server"
+name = "MailRegulator"
 version = "1.0.0"
 edition = "2021"
 

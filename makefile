@@ -33,27 +33,25 @@ logs:
 # Install the systemd service file and reload daemon
 service:
 	@echo "Creating systemd service file for $(BINARY_NAME)"
-	@{
-		echo "[Unit]"
-		echo "Description=Mailing Server Application"
-		echo "After=network.target"
-		echo ""
-		echo "[Service]"
-		echo "Type=simple"
-		echo "ExecStart=$(INSTALL_DIR)/$(BINARY_NAME)"
-		echo "WorkingDirectory=$(CONFIG_DIR)"
-		echo "User=ais"
-		echo "Group=ais"
-		echo "Restart=on-failure"
-		echo "RestartSec=10"
-		echo "StandardOutput=append:$(LOG_DIR)/$(BINARY_NAME).log"
-		echo "StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err"
-		echo ""
-		echo "[Install]"
-		echo "WantedBy=multi-user.target"
-	} > $(SERVICE_FILE)
+	@cat <<EOF > $(SERVICE_FILE)
+[Unit]
+Description=Mailing Server Application
+After=network.target
 
-	install -m 644 $(SERVICE_FILE) $(SERVICE_FILE)
+[Service]
+Type=simple
+ExecStart=$(INSTALL_DIR)/$(BINARY_NAME)
+WorkingDirectory=$(CONFIG_DIR)
+User=ais
+Group=ais
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:$(LOG_DIR)/$(BINARY_NAME).log
+StandardError=append:$(LOG_DIR)/$(BINARY_NAME).err
+
+[Install]
+WantedBy=multi-user.target
+EOF
 	systemctl daemon-reload && systemctl enable $(BINARY_NAME).service
 
 # Run the binary with the correct working directory and capture logs

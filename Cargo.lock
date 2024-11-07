@@ -3,6 +3,25 @@
 version = 3
 
 [[package]]
+name = "MailRegulator"
+version = "1.0.0"
+dependencies = [
+ "artisan_middleware",
+ "colored",
+ "config 0.14.0",
+ "dusa_collection_utils 3.0.3",
+ "lettre",
+ "rand 0.8.5",
+ "reqwest",
+ "rng",
+ "serde",
+ "serde_json",
+ "simple_pretty",
+ "tokio",
+ "toml 0.8.19",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1366,25 +1385,6 @@ name = "log"
 version = "0.4.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
-
-[[package]]
-name = "mailing_server"
-version = "1.0.0"
-dependencies = [
- "artisan_middleware",
- "colored",
- "config 0.14.0",
- "dusa_collection_utils 3.0.3",
- "lettre",
- "rand 0.8.5",
- "reqwest",
- "rng",
- "serde",
- "serde_json",
- "simple_pretty",
- "tokio",
- "toml 0.8.19",
-]
 
 [[package]]
 name = "maybe-uninit"
