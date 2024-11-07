@@ -1,24 +1,23 @@
 use ::config::{Config, File};
-use artisan_middleware::encryption::decrypt_text;
-use artisan_middleware::log;
-use artisan_middleware::logger::{set_log_level, LogLevel};
-use artisan_middleware::network_communication::read_message;
+use artisan_middleware::communication_proto::receive_message_tcp;
 use artisan_middleware::notifications::Email;
 use config::AppConfig;
 use dusa_collection_utils::errors::{ErrorArrayItem, Errors};
 use dusa_collection_utils::functions::{create_hash, truncate};
+use dusa_collection_utils::log;
+use dusa_collection_utils::log::{set_log_level, LogLevel};
 use dusa_collection_utils::rwarc::LockWithTimeout;
 use dusa_collection_utils::stringy::Stringy;
 use lettre::address::AddressError;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
+use tokio::net::TcpListener;
 mod config;
 
 use std::error::Error;
 use std::time::Duration;
 use std::{
-    io::{self, Write},
-    net::{TcpListener, TcpStream},
+    io,
     time::Instant,
 };
 
@@ -32,7 +31,8 @@ struct TimedEmail {
 #[allow(dead_code)]
 struct ErrorEmail {
     hash: String,
-    subject: Option<String>,
+    subject: Option<String>, // let stream = TcpStream::connect("127.0.0.1:1827").map_err(|e| ErrorArrayItem::from(e))?;
+
     occoured_at: Instant,
 }
 
@@ -186,77 +186,53 @@ async fn process_emails(
     }
 }
 
-async fn handle_client(
-    mut stream: TcpStream,
-    emails: LockWithTimeout<Vec<TimedEmail>>,
-) -> Result<(), ErrorArrayItem> {
-    // Read the message from the client using read_message
-    let (_major_version, _minor_version, received_data) = read_message(&stream)?;
-
-    // Convert received data to a String
-    let received_data_str = String::from_utf8_lossy(&received_data);
-    log!(LogLevel::Debug, "Emails received: {}", received_data_str);
-    log!(LogLevel::Info, "Emails received");
-
-    // Decrypt email data
-    let email_data_plain = decrypt_received_data(Stringy::from(received_data_str.to_string()))?;
-    let email_data: Vec<&str> = email_data_plain.split("-=-").collect();
-    let subject: Stringy = email_data[0].into();
-    let body: Stringy = email_data[1].into();
-
-    let email = Email { subject, body };
-
-    // Add email to the vector with current timestamp
-    let timed_email = TimedEmail {
-        email: email.clone(),
-        received_at: Instant::now(),
-    };
-    emails
-        .try_write_with_timeout(Some(Duration::from_secs(3)))
-        .await?
-        .push(timed_email);
-    drop(emails);
-
-    // Send response to client
-    stream.write_all(b"Email received").map_err(|e| {
-        ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-    })?;
-    stream.flush().map_err(|e| {
-        ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-    })?;
-
-    Ok(())
-}
-
-fn decrypt_received_data(data: Stringy) -> Result<Stringy, ErrorArrayItem> {
-    decrypt_text(data)
-}
 
 async fn start_server(
     host: &str,
     port: u16,
     emails: LockWithTimeout<Vec<TimedEmail>>,
 ) -> io::Result<()> {
-    let listener = TcpListener::bind(format!("{}:{}", host, port))?;
+    let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
     log!(LogLevel::Info, "Server listening on {}:{}", host, port);
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let emails_clone = emails.clone();
+    // let emails_clone = emails.clone();
+    loop {
+        let emails_clone = emails.clone();
+        match listener.accept().await {
+            Ok((mut stream, addr)) => {
+                log!(LogLevel::Info, "Accepted connection from {}", addr);
                 tokio::spawn(async move {
-                    if let Err(err) = handle_client(stream, emails_clone).await {
-                        log!(LogLevel::Error, "Error handling client: {}", err);
-                    }
-                });
-            }
-            Err(err) => {
-                log!(LogLevel::Error, "Error accepting connection: {}", err);
-            }
-        }
-    }
+                    match receive_message_tcp::<Stringy>(&mut stream).await {
+                        Ok(message) => {
+                            let email = Email::from_json(&message.payload)
+                                .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
-    Ok(())
+                            log!(LogLevel::Info, "You've got mail: {}", email);
+
+                            // Add email to the vector with current timestamp
+                            let timed_email = TimedEmail {
+                                email: email.clone(),
+                                received_at: Instant::now(),
+                            };
+
+                            emails_clone
+                                .try_write_with_timeout(Some(Duration::from_secs(3)))
+                                .await
+                                .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?
+                                .push(timed_email);
+
+                            drop(emails_clone);
+
+                            return Ok(())
+
+                        }
+                        Err(err) => return Err(err),
+                    }
+                })
+            }
+            Err(err) => return Err(err),
+        };
+    }
 }
 
 fn load_app_config() -> Result<AppConfig, Box<dyn Error>> {
@@ -282,7 +258,7 @@ async fn main() {
         Ok(mut data_loaded) => {
             data_loaded.git = None;
             data_loaded.database = None;
-            data_loaded.app_name = env!("CARGO_PKG_NAME").to_string();
+            data_loaded.app_name = Stringy::from_string(env!("CARGO_PKG_NAME").to_string());
             data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
             data_loaded
         }
@@ -337,6 +313,6 @@ async fn main() {
     });
     // Start the server
     if let Err(err) = start_server("0.0.0.0", 1827, emails).await {
-        log!(LogLevel::Error, "Error starting server: {}", err);
+        log!(LogLevel::Error, "Error running server: {}", err);
     }
 }
