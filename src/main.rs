@@ -32,7 +32,6 @@ struct TimedEmail {
 struct ErrorEmail {
     hash: String,
     subject: Option<String>, // let stream = TcpStream::connect("127.0.0.1:1827").map_err(|e| ErrorArrayItem::from(e))?;
-
     occoured_at: Instant,
 }
 

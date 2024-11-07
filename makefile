@@ -1,5 +1,5 @@
 # Variables
-BINARY_NAME=mailing_server
+BINARY_NAME=MailRegulator
 INSTALL_DIR=/usr/local/bin
 CONFIG_DIR=/etc/$(BINARY_NAME)
 SERVICE_FILE=/etc/systemd/system/$(BINARY_NAME).service
