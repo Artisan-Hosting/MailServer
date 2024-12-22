@@ -1,10 +1,8 @@
-use std::time::{Duration, Instant};
 
-use artisan_middleware::state_persistence::AppState;
-use dusa_collection_utils::{errors::{ErrorArrayItem, Errors}, functions::{create_hash, truncate}, log::LogLevel, log, rwarc::LockWithTimeout};
+use dusa_collection_utils::{errors::{ErrorArrayItem, Errors}, log::LogLevel, log};
 use lettre::{address::AddressError, transport::smtp::authentication::Credentials, Message, SmtpTransport, Transport};
 
-use crate::{config::AppConfig, ErrorEmail, TimedEmail};
+use crate::config::AppConfig;
 
 pub fn send_email(config: &AppConfig, subject: String, body: String) -> Result<(), ErrorArrayItem> {
     log!(LogLevel::Trace, "Constructing email");

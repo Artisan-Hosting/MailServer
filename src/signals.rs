@@ -1,4 +1,4 @@
-use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Duration};
+use std::{sync::Arc, thread};
 
 use dusa_collection_utils::{log, log::LogLevel};
 use signal_hook::{consts::{SIGHUP, SIGUSR1}, iterator::Signals};
