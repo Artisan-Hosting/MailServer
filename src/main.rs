@@ -1,25 +1,37 @@
 use ::config::{Config, File};
-use artisan_middleware::communication_proto::receive_message_tcp;
+use artisan_middleware::common::{update_state, wind_down_state};
+use artisan_middleware::communication_proto::{
+    read_until, Flags, ProtocolHeader, ProtocolMessage, ProtocolStatus, EOL,
+};
 use artisan_middleware::notifications::Email;
+use artisan_middleware::state_persistence::{AppState, StatePersistence};
+use artisan_middleware::timestamp::current_timestamp;
+use artisan_middleware::version::aml_version;
 use config::AppConfig;
-use dusa_collection_utils::errors::{ErrorArrayItem, Errors};
+use dusa_collection_utils::errors::{ErrorArrayItem, UnifiedResult};
 use dusa_collection_utils::functions::{create_hash, truncate};
 use dusa_collection_utils::log;
 use dusa_collection_utils::log::{set_log_level, LogLevel};
 use dusa_collection_utils::rwarc::LockWithTimeout;
 use dusa_collection_utils::stringy::Stringy;
-use lettre::address::AddressError;
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::{Message, SmtpTransport, Transport};
-use tokio::net::TcpListener;
+use dusa_collection_utils::types::PathType;
+use dusa_collection_utils::version::{SoftwareVersion, Version, VersionCode};
+use email::send_email;
+use signals::{reload_monitor, shutdown_monitor};
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Notify, RwLockWriteGuard};
+use tokio::time::sleep;
 mod config;
-
+mod email;
+mod signals;
+use core::panic;
 use std::error::Error;
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use std::{
-    io,
-    time::Instant,
-};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 struct TimedEmail {
@@ -30,207 +42,466 @@ struct TimedEmail {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ErrorEmail {
-    hash: String,
+    hash: Stringy,
     subject: Option<String>, // let stream = TcpStream::connect("127.0.0.1:1827").map_err(|e| ErrorArrayItem::from(e))?;
     occoured_at: Instant,
 }
 
-#[allow(dead_code)]
-fn send_email(config: AppConfig, subject: String, body: String) -> Result<(), ErrorArrayItem> {
-    log!(LogLevel::Trace, "Constructing email");
-    // Build the email
-    let email = Message::builder()
-        .to(config.smtp.to.parse().map_err(|e: AddressError| {
-            ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-        })?)
-        .from(config.smtp.from.parse().map_err(|e: AddressError| {
-            ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-        })?)
-        .subject(subject)
-        .body(body)
-        .map_err(|e| {
-            ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-        })?;
+const PORT: u16 = 1827;
+const HOST: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 
-    // The SMTP credentials
-    let creds = Credentials::new(config.smtp.username, config.smtp.password);
-
-    let mailer = SmtpTransport::relay("mail.ramfield.net")
-        .map_err(|e| {
-            ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
-        })?
-        .credentials(creds)
-        .build();
-
-    // Send the email
-    log!(LogLevel::Trace, "Match statement before sending email");
-    let d = match mailer.send(&email) {
-        Ok(_) => {
-            log!(LogLevel::Info, "Email sent successfully.");
-            Ok(())
-        }
+#[tokio::main]
+async fn main() {
+    // Load the application configurations
+    let app_config: AppConfig = match load_app_config() {
+        Ok(config) => config,
         Err(e) => {
-            log!(LogLevel::Error, "Failed to send email: {}", e);
-            Err(ErrorArrayItem::new(
-                Errors::GeneralError,
-                format!("mailer: {}", e.to_string()),
-            ))
+            log!(LogLevel::Error, "Failed to load configuration: {}", e);
+            // return;
+            panic!()
         }
     };
 
-    log!(LogLevel::Trace, "Email processed returning");
-    d
-}
+    let default_config = match artisan_middleware::config::AppConfig::new() {
+        Ok(mut data_loaded) => {
+            data_loaded.git = None;
+            data_loaded.database = None;
+            data_loaded.app_name = Stringy::from(env!("CARGO_PKG_NAME").to_string());
+            data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
+            data_loaded
+        }
+        Err(e) => {
+            log!(LogLevel::Error, "Error loading config: {}", e);
+            // return;
+            panic!()
+        }
+    };
 
-async fn process_emails(
-    config: AppConfig,
-    emails: LockWithTimeout<Vec<TimedEmail>>,
-    errors: LockWithTimeout<Vec<ErrorEmail>>,
-    loop_interval: Duration,
-    rate_limit: usize,
-) {
+    //  Initialize app state
+    let state_path: PathType = StatePersistence::get_state_path(&default_config);
+    let mut state = match StatePersistence::load_state(&state_path).await {
+        Ok(mut loaded_data) => {
+            log!(LogLevel::Info, "Loaded previous state data");
+            log!(LogLevel::Trace, "Previous state data: {:#?}", loaded_data);
+            loaded_data.is_active = false;
+            loaded_data.data = String::from("Initializing");
+            loaded_data.version = {
+                let library: Version = aml_version();
+                let application = Version::new(env!("CARGO_PKG_VERSION"), VersionCode::Production);
+
+                SoftwareVersion {
+                    application,
+                    library,
+                }
+            };
+            loaded_data.config.debug_mode = default_config.debug_mode;
+            loaded_data.last_updated = current_timestamp();
+            loaded_data.config.log_level = default_config.log_level;
+            set_log_level(loaded_data.config.log_level);
+            loaded_data.error_log.clear();
+            update_state(&mut loaded_data, &state_path, None).await;
+            loaded_data
+        }
+        Err(e) => {
+            log!(LogLevel::Warn, "No previous state loaded, creating new one");
+            log!(LogLevel::Debug, "Error loading previous state: {}", e);
+            let mut state = AppState {
+                name: env!("CARGO_PKG_NAME").to_owned(),
+                version: {
+                    let library: Version = aml_version();
+                    let application =
+                        Version::new(env!("CARGO_PKG_VERSION"), VersionCode::Production);
+
+                    SoftwareVersion {
+                        application,
+                        library,
+                    }
+                },
+                data: String::new(),
+                last_updated: current_timestamp(),
+                event_counter: 0,
+                is_active: false,
+                error_log: vec![],
+                config: default_config.clone(),
+                system_application: true,
+            };
+            state.is_active = false;
+            state.data = String::from("Initializing");
+            state.config.debug_mode = true;
+            state.last_updated = current_timestamp();
+            state.config.log_level = default_config.log_level;
+            set_log_level(LogLevel::Trace);
+            state.error_log.clear();
+            update_state(&mut state, &state_path, None).await;
+            state
+        }
+    };
+
+    set_log_level(LogLevel::Trace);
+
+    // Listening for the signals
+    let reload_flag = Arc::new(Notify::new());
+    let shutdown_flag = Arc::new(Notify::new());
+    let execution: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+
+    // Spawn separate tasks that might signal to the main loop
+    let reload_flag_clone = reload_flag.clone();
+    reload_monitor(reload_flag_clone);
+
+    let shutdown_flag_clone = shutdown_flag.clone();
+    shutdown_monitor(shutdown_flag_clone);
+
+    // Arrays to store email data and errors
+    let emails: LockWithTimeout<Vec<TimedEmail>> = LockWithTimeout::new(Vec::new());
+    let errors: LockWithTimeout<Vec<ErrorEmail>> = LockWithTimeout::new(Vec::new());
+
+    // Defining the listeners
+    let tcp_listener: TcpListener = UnifiedResult::new(
+        TcpListener::bind(format!("{}:{}", HOST, PORT))
+            .await
+            .map_err(|err| ErrorArrayItem::from(err)),
+    )
+    .unwrap();
+
     loop {
-        // Lock the errors vector
-        log!(LogLevel::Trace, "Locking email_errors");
-        let mut email_errors = match errors.try_write().await {
-            Ok(vec) => vec,
-            Err(_) => {
-                log!(
-                    LogLevel::Error,
-                    "Failed to acquire write lock on the error counter"
-                );
-                continue;
-            }
-        };
+        tokio::select! {
+            Ok(mut conn) = tcp_listener.accept() => {
 
-        // Lock the emails vector
-        log!(LogLevel::Trace, "Locking email_array");
-        let mut email_vec = match emails.try_write().await {
-            Ok(vec) => vec,
-            Err(_) => {
-                log!(
-                    LogLevel::Error,
-                    "Failed to acquire write lock on emails vector"
-                );
-                email_errors.push(ErrorEmail {
-                    hash: truncate(&create_hash("Failed to lock email array".to_owned()), 10)
-                        .to_owned(),
-                    subject: None,
-                    occoured_at: Instant::now(),
-                });
-                continue;
-            }
-        };
+                let mut response: ProtocolMessage<()> =
+                UnifiedResult::new(ProtocolMessage::new(Flags::NONE, ()).map_err(ErrorArrayItem::from))
+                .unwrap();
 
-        log!(LogLevel::Trace, "Starting timeout processing");
-        let current_time = Instant::now();
-        let mut i = 0;
-        let mut iteration_count = 0;
-        log!(LogLevel::Trace, "Cloning config for timeout calcs");
-        let config_clone = config.clone();
-        log!(LogLevel::Trace, "Cloned config: {}", config_clone);
+                if execution.load(Ordering::Relaxed) {
+                      // ? To allow for response sending based on messages getting all the way into the locked array we're implementing the receiver logic here
+                        // Read until EOL to get the entire message
+                        let mut buffer: Vec<u8> = UnifiedResult::new(
+                            read_until(&mut conn.0, EOL.as_bytes().to_vec())
+                                .await
+                                .map_err(|err| ErrorArrayItem::from(err)),
+                        )
+                        .unwrap();
 
-        while i < email_vec.len() && iteration_count < rate_limit {
-            if current_time.duration_since(email_vec[i].received_at) > Duration::from_secs(300) {
-                log!(
-                    LogLevel::Info,
-                    "Expired email discarding: {:?}",
-                    email_vec[i]
-                );
-                email_vec.remove(i);
-            } else {
-                match send_email(
-                    config_clone.clone(),
-                    email_vec[i].email.subject.to_string(),
-                    email_vec[i].email.body.to_string(),
-                ) {
-                    Ok(_) => {
-                        log!(
-                            LogLevel::Info,
-                            "Sending Email: {} of {}",
-                            iteration_count + 1,
-                            rate_limit
-                        );
-                        email_vec.remove(i);
+                        // Truncate the EOL from the buffer
+                        if let Some(pos) = buffer
+                            .windows(EOL.len())
+                            .rposition(|window| window == EOL.as_bytes())
+                        {
+                            buffer.truncate(pos);
+                        }
+
+                        match ProtocolMessage::<Stringy>::from_bytes(&buffer).await {
+                            Ok(message) => {
+                                log!(LogLevel::Debug, "Message recieved: {:#?}", message);
+                                // ! Processing the header, We need email data to be sent with SECURE flags over tcp
+                                let header: ProtocolHeader = message.header;
+
+                                if header.flags != Flags::OPTIMIZED.bits() {
+                                    // TODO add a expects function for this
+                                    // Preparing a response requesting a resend with a upgrade
+
+                                    response.header.status = ProtocolStatus::SIDEGRADE.bits();
+                                    response.header.reserved = Flags::OPTIMIZED.bits();
+                                    log!(LogLevel::Error, "Recieved message in a illegal format asking them to try again");
+                                    log!(
+                                        LogLevel::Debug,
+                                        "Sent the following header to sender: {}",
+                                        response.header
+                                    );
+
+                                    let response_bytes: Vec<u8> = UnifiedResult::new(
+                                        response.to_bytes().await.map_err(ErrorArrayItem::from),
+                                    )
+                                    .unwrap();
+
+                                    let _ = conn.0.write_all(&response_bytes).await;
+                                    let _ = conn.0.flush().await;
+                                    state.event_counter += 1;
+                                    update_state(&mut state, &state_path, None).await;
+
+                                    // log!(Log)
+                                    continue;
+                                }
+
+                                // ! Now were processing the email data
+                                let payload: Stringy = message.payload;
+
+                                let email: Email = match Email::from_json(&payload) {
+                                    Ok(email) => email,
+                                    Err(err) => {
+                                        log!(
+                                            LogLevel::Error,
+                                            "Error while deserializing email: {}",
+                                            err
+                                        );
+
+                                        send_err_tcp(&mut conn.0).await;
+                                        state.event_counter += 1;
+                                        update_state(&mut state, &state_path, None).await;
+                                        continue;
+                                    }
+                                };
+
+                                // preping email for queue
+                                let email_tagged = TimedEmail {
+                                    email,
+                                    received_at: Instant::now(),
+                                };
+
+                                let email_array_results: UnifiedResult<
+                                    RwLockWriteGuard<'_, Vec<TimedEmail>>,
+                                > = UnifiedResult::new(
+                                    emails.try_write_with_timeout(None).await,
+                                );
+
+                                if email_array_results.is_err() {
+                                    send_err_tcp(&mut conn.0).await;
+                                    // continue;
+                                    panic!()
+                                }
+
+                                let mut email_array: RwLockWriteGuard<'_, Vec<TimedEmail>> =
+                                    email_array_results.unwrap();
+
+                                {
+                                    email_array.push(email_tagged);
+                                    drop(email_array);
+                                }
+
+                                response.header.status = ProtocolStatus::OK.bits();
+                                log!(
+                                    LogLevel::Debug,
+                                    "Sent the following header to sender: {}",
+                                    response.header
+                                );
+
+                                let response_bytes: Vec<u8> = UnifiedResult::new(
+                                    response.to_bytes().await.map_err(ErrorArrayItem::from),
+                                )
+                                .unwrap();
+
+                                let _ = conn.0.write_all(&response_bytes).await;
+                                let _ = conn.0.flush().await;
+
+                                state.event_counter += 1;
+                                update_state(&mut state, &state_path, None).await;
+                            }
+                            Err(error) => {
+                                response.header.status = ProtocolStatus::ERROR.bits();
+                                let response_bytes: Vec<u8> = UnifiedResult::new(
+                                    response.to_bytes().await.map_err(ErrorArrayItem::from),
+                                )
+                                .unwrap();
+
+                                let _ = conn.0.write_all(&response_bytes).await;
+                                let _ = conn.0.flush().await;
+
+                                state.event_counter += 1;
+                                update_state(&mut state, &state_path, None).await;
+
+                                log!(LogLevel::Error, "Error reading message: {}", error);
+                                continue;
+                            }
+                        }
+
+                }
+
+
+            },
+            _ = reload_flag.notified() => {
+                execution.store(false, Ordering::Relaxed);
+                // sleep to ensure the other threads paused execution
+                sleep(Duration::from_secs(2)).await;
+
+                // if a reload is called, we'll clear the message queue and reload the config data
+                update_state(&mut state, &state_path, None).await;
+
+                let mut email_array =
+                    UnifiedResult::new(emails.try_write_with_timeout(None).await)
+                        .unwrap();
+
+                email_array.clear();
+                drop(email_array);
+
+                // Load the application configuration
+                let default_config = match artisan_middleware::config::AppConfig::new() {
+                    Ok(mut data_loaded) => {
+                        data_loaded.git = None;
+                        data_loaded.database = None;
+                        data_loaded.app_name =
+                            Stringy::from(env!("CARGO_PKG_NAME").to_string());
+                        data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
+                        data_loaded
                     }
                     Err(e) => {
+                        log!(LogLevel::Error, "Error loading config: {}", e);
+                        // return;
+                        panic!()
+                    }
+                };
+
+                // Initialize app state
+                let mut state = match StatePersistence::load_state(&state_path).await {
+                    Ok(mut loaded_data) => {
+                        log!(LogLevel::Info, "Loaded previous state data");
+                        log!(LogLevel::Trace, "Previous state data: {:#?}", loaded_data);
+                        loaded_data.is_active = false;
+                        loaded_data.data = String::from("Initializing");
+                        loaded_data.config.debug_mode = default_config.debug_mode;
+                        loaded_data.last_updated = current_timestamp();
+                        loaded_data.config.log_level = default_config.log_level;
+                        set_log_level(loaded_data.config.log_level);
+                        loaded_data.error_log.clear();
+                        loaded_data
+                    }
+                    Err(e) => {
+                        log!(LogLevel::Warn, "No previous state loaded, creating new one");
+                        log!(LogLevel::Debug, "Error loading previous state: {}", e);
+                        let mut state = AppState {
+                            name: env!("CARGO_PKG_NAME").to_owned(),
+                            version: {
+                                let library: Version = aml_version();
+                                let application = Version::new(env!("CARGO_PKG_VERSION"), VersionCode::Production);
+
+                                SoftwareVersion{ application, library }
+                            },
+                            data: String::new(),
+                            last_updated: current_timestamp(),
+                            event_counter: 0,
+                            is_active: false,
+                            error_log: vec![],
+                            config: default_config.clone(),
+                            system_application: true
+                        };
+                        state.is_active = false;
+                        state.data = String::from("Initializing");
+                        state.config.debug_mode = true;
+                        state.last_updated = current_timestamp();
+                        state.config.log_level = default_config.log_level;
+                        set_log_level(LogLevel::Trace);
+                        state.error_log.clear();
+
+                        state
+                    }
+                };
+
+                update_state(&mut state, &state_path, None).await;
+
+                execution.store(true, Ordering::Relaxed);
+            },
+            _ = shutdown_flag.notified() => {
+                execution.store(false, Ordering::Relaxed);
+                // sleep to ensure the other threads paused execution
+                sleep(Duration::from_secs(2)).await;
+                wind_down_state(&mut state, &state_path).await;
+                std::process::exit(0);
+
+            },
+            _ = sleep(Duration::from_secs(app_config.app.loop_interval_seconds)) => {
+                // Lock the errors vector
+                log!(LogLevel::Trace, "Locking email_errors");
+                let mut email_errors = match errors.try_write().await {
+                    Ok(vec) => vec,
+                    Err(_) => {
                         log!(
                             LogLevel::Error,
-                            "An error occurred while sending email: {}",
-                            e
+                            "Failed to acquire write lock on the error counter"
+                        );
+                        continue;
+                    }
+                };
+
+                // Lock the emails vector
+                log!(LogLevel::Trace, "Locking email_array");
+                let mut email_vec = match emails.try_write().await {
+                    Ok(vec) => vec,
+                    Err(_) => {
+                        log!(
+                            LogLevel::Error,
+                            "Failed to acquire write lock on emails vector"
                         );
                         email_errors.push(ErrorEmail {
-                            hash: truncate(&create_hash(e.to_string()), 10).to_owned(),
-                            subject: Some(e.to_string()),
+                            hash: truncate(&*create_hash("Failed to lock email array".to_owned()), 10),
+                            subject: None,
                             occoured_at: Instant::now(),
                         });
-                        i += 1;
+                        continue;
                     }
-                }
-            }
-            iteration_count += 1;
-        }
+                };
 
-        if email_errors.is_empty() {
-            log!(LogLevel::Info, "No errors reported");
-        } else {
-            log!(LogLevel::Warn, "Current errors: {}", email_errors.len());
-        }
+                log!(LogLevel::Trace, "Starting timeout processing");
+                let current_time = Instant::now();
+                let mut i = 0;
+                let mut iteration_count = 0;
 
-        drop(email_errors);
-        drop(email_vec);
-        log!(LogLevel::Trace, "Resting");
-        // Sleep for the specified interval
-        tokio::time::sleep(loop_interval).await;
-    }
-}
-
-
-async fn start_server(
-    host: &str,
-    port: u16,
-    emails: LockWithTimeout<Vec<TimedEmail>>,
-) -> io::Result<()> {
-    let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-    log!(LogLevel::Info, "Server listening on {}:{}", host, port);
-
-    // let emails_clone = emails.clone();
-    loop {
-        let emails_clone = emails.clone();
-        match listener.accept().await {
-            Ok((mut stream, addr)) => {
-                log!(LogLevel::Info, "Accepted connection from {}", addr);
-                tokio::spawn(async move {
-                    match receive_message_tcp::<Stringy>(&mut stream).await {
-                        Ok(message) => {
-                            let email = Email::from_json(&message.payload)
-                                .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-
-                            log!(LogLevel::Info, "You've got mail: {}", email);
-
-                            // Add email to the vector with current timestamp
-                            let timed_email = TimedEmail {
-                                email: email.clone(),
-                                received_at: Instant::now(),
-                            };
-
-                            emails_clone
-                                .try_write_with_timeout(Some(Duration::from_secs(3)))
-                                .await
-                                .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?
-                                .push(timed_email);
-
-                            drop(emails_clone);
-
-                            return Ok(())
-
+                while i < email_vec.len() && iteration_count < app_config.app.rate_limit {
+                    if current_time.duration_since(email_vec[i].received_at) > Duration::from_secs(300) {
+                        log!(
+                            LogLevel::Info,
+                            "Expired email discarding: {:?}",
+                            email_vec[i]
+                        );
+                        email_vec.remove(i);
+                    } else {
+                        match send_email(
+                            &app_config,
+                            email_vec[i].email.subject.to_string(),
+                            email_vec[i].email.body.to_string(),
+                        ) {
+                            Ok(_) => {
+                                log!(
+                                    LogLevel::Info,
+                                    "Sending Email: {} of {}",
+                                    iteration_count + 1,
+                                    app_config.app.rate_limit
+                                );
+                                email_vec.remove(i);
+                            }
+                            Err(e) => {
+                                log!(
+                                    LogLevel::Error,
+                                    "An error occurred while sending email: {}",
+                                    e
+                                );
+                                email_errors.push(ErrorEmail {
+                                    hash: truncate(&*create_hash(e.to_string()), 10).to_owned(),
+                                    subject: Some(e.to_string()),
+                                    occoured_at: Instant::now(),
+                                });
+                                i += 1;
+                            }
                         }
-                        Err(err) => return Err(err),
                     }
-                })
-            }
-            Err(err) => return Err(err),
-        };
+                    iteration_count += 1;
+                }
+
+                if email_errors.is_empty() {
+                    log!(LogLevel::Debug, "No errors reported");
+                } else {
+                    log!(LogLevel::Warn, "Current errors: {}", email_errors.len());
+                }
+
+                drop(email_errors);
+                drop(email_vec);
+                log!(LogLevel::Trace, "Resting");
+            },
+        }
+    }
+
+    // Sending error over tcp
+    async fn send_err_tcp(conn: &mut TcpStream) {
+        let mut response: ProtocolMessage<()> =
+            UnifiedResult::new(ProtocolMessage::new(Flags::NONE, ()).map_err(ErrorArrayItem::from))
+                .unwrap();
+
+        response.header.status = ProtocolStatus::ERROR.bits();
+
+        let response_bytes: Vec<u8> =
+            UnifiedResult::new(response.to_bytes().await.map_err(ErrorArrayItem::from)).unwrap();
+
+        let _ = conn.write_all(&response_bytes).await;
+        let _ = conn.flush().await;
+        // return;
+        panic!();
     }
 }
 
@@ -240,78 +511,4 @@ fn load_app_config() -> Result<AppConfig, Box<dyn Error>> {
         .build()?;
 
     settings.try_deserialize().map_err(|e| e.into())
-}
-
-#[tokio::main]
-async fn main() {
-    // Load the application configuration
-    let app_config: AppConfig = match load_app_config() {
-        Ok(config) => config,
-        Err(e) => {
-            log!(LogLevel::Error, "Failed to load configuration: {}", e);
-            return;
-        }
-    };
-
-    let default_config = match artisan_middleware::config::AppConfig::new() {
-        Ok(mut data_loaded) => {
-            data_loaded.git = None;
-            data_loaded.database = None;
-            data_loaded.app_name = Stringy::from_string(env!("CARGO_PKG_NAME").to_string());
-            data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
-            data_loaded
-        }
-        Err(e) => {
-            log!(LogLevel::Error, "Error loading config: {}", e);
-            return;
-        }
-    };
-
-    // Set the log level dynamically based on the configuration or default
-    set_log_level(default_config.log_level);
-    log!(
-        LogLevel::Info,
-        "Server starting with log level: {:?}",
-        default_config.log_level
-    );
-
-    if default_config.debug_mode {
-        log!(LogLevel::Info, "{default_config}");
-        log!(LogLevel::Info, "{app_config}");
-    };
-
-    // Set up loop interval and rate limit from configuration
-    let loop_interval_seconds = app_config.app.loop_interval_seconds;
-    let rate_limit = app_config.app.rate_limit;
-
-    log!(
-        LogLevel::Info,
-        "Loop interval set to: {} seconds",
-        loop_interval_seconds
-    );
-    log!(LogLevel::Info, "Rate limit set to: {}", rate_limit);
-
-    // Vector to store emails
-    let emails: LockWithTimeout<Vec<TimedEmail>> = LockWithTimeout::new(Vec::new());
-    let errors: LockWithTimeout<Vec<ErrorEmail>> = LockWithTimeout::new(Vec::new());
-
-    // Start the email processing loop in a separate thread
-    let emails_clone: LockWithTimeout<Vec<TimedEmail>> = emails.clone();
-    let errors_clone: LockWithTimeout<Vec<ErrorEmail>> = errors.clone();
-    let loop_interval = Duration::from_secs(loop_interval_seconds);
-    let app_config_clone: AppConfig = app_config.clone();
-    tokio::spawn(async move {
-        process_emails(
-            app_config_clone,
-            emails_clone,
-            errors_clone,
-            loop_interval,
-            rate_limit,
-        )
-        .await;
-    });
-    // Start the server
-    if let Err(err) = start_server("0.0.0.0", 1827, emails).await {
-        log!(LogLevel::Error, "Error running server: {}", err);
-    }
 }
