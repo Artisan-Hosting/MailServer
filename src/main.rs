@@ -1,7 +1,7 @@
 use ::config::{Config, File};
 use artisan_middleware::common::{update_state, wind_down_state};
 use artisan_middleware::communication_proto::{
-    read_until, Flags, ProtocolHeader, ProtocolMessage, ProtocolStatus, EOL,
+    read_until, send_empty_ok, Flags, Proto, ProtocolHeader, ProtocolMessage, ProtocolStatus, EOL
 };
 use artisan_middleware::notifications::Email;
 use artisan_middleware::state_persistence::{AppState, StatePersistence};
@@ -81,7 +81,7 @@ async fn main() {
                 
             data_loaded.version = serde_json::to_string(&raw_version).unwrap();
             // ! don't unwrap this.
-            
+
             data_loaded
         }
         Err(e) => {
@@ -281,20 +281,7 @@ async fn main() {
                                     drop(email_array);
                                 }
 
-                                response.header.status = ProtocolStatus::OK.bits();
-                                log!(
-                                    LogLevel::Debug,
-                                    "Sent the following header to sender: {}",
-                                    response.header
-                                );
-
-                                let response_bytes: Vec<u8> = UnifiedResult::new(
-                                    response.to_bytes().await.map_err(ErrorArrayItem::from),
-                                )
-                                .unwrap();
-
-                                let _ = conn.0.write_all(&response_bytes).await;
-                                let _ = conn.0.flush().await;
+                                let _ = send_empty_ok::<TcpStream>(&mut conn.0, Proto::TCP).await.unwrap();
 
                                 state.event_counter += 1;
                                 update_state(&mut state, &state_path, None).await;
