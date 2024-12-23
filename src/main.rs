@@ -6,7 +6,7 @@ use artisan_middleware::communication_proto::{
 use artisan_middleware::notifications::Email;
 use artisan_middleware::state_persistence::{AppState, StatePersistence};
 use artisan_middleware::timestamp::current_timestamp;
-use artisan_middleware::version::aml_version;
+use artisan_middleware::version::{aml_version, str_to_version};
 use config::AppConfig;
 use dusa_collection_utils::errors::{ErrorArrayItem, UnifiedResult};
 use dusa_collection_utils::functions::{create_hash, truncate};
@@ -67,7 +67,21 @@ async fn main() {
             data_loaded.git = None;
             data_loaded.database = None;
             data_loaded.app_name = Stringy::from(env!("CARGO_PKG_NAME").to_string());
-            data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
+            
+            let raw_version: SoftwareVersion = {
+                // defining the version
+                let library_version: Version = aml_version();
+                let software_version: Version = str_to_version(env!("CARGO_PKG_VERSION"), Some(VersionCode::Production));
+                
+                SoftwareVersion {
+                    application: software_version,
+                    library: library_version,
+                }
+            };
+                
+            data_loaded.version = serde_json::to_string(&raw_version).unwrap();
+            // ! don't unwrap this.
+            
             data_loaded
         }
         Err(e) => {
