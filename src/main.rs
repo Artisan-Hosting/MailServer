@@ -1,8 +1,5 @@
 use ::config::{Config, File};
 use artisan_middleware::common::{update_state, wind_down_state};
-use artisan_middleware::communication_proto::{
-    read_until, send_empty_ok, Flags, Proto, ProtocolHeader, ProtocolMessage, ProtocolStatus, EOL
-};
 use artisan_middleware::notifications::Email;
 use artisan_middleware::state_persistence::{AppState, StatePersistence};
 use artisan_middleware::timestamp::current_timestamp;
@@ -18,6 +15,13 @@ use dusa_collection_utils::types::PathType;
 use dusa_collection_utils::version::{SoftwareVersion, Version, VersionCode};
 use email::send_email;
 use signals::{reload_monitor, shutdown_monitor};
+use simple_comms::network::send_receive::send_empty_ok;
+use simple_comms::protocol::flags::Flags;
+use simple_comms::protocol::header::{ProtocolHeader, EOL};
+use simple_comms::protocol::io_helpers::read_until;
+use simple_comms::protocol::message::ProtocolMessage;
+use simple_comms::protocol::proto::Proto;
+use simple_comms::protocol::status::ProtocolStatus;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, RwLockWriteGuard};
@@ -57,8 +61,7 @@ async fn main() {
         Ok(config) => config,
         Err(e) => {
             log!(LogLevel::Error, "Failed to load configuration: {}", e);
-            // return;
-            panic!()
+            std::process::exit(0)
         }
     };
 
@@ -67,20 +70,21 @@ async fn main() {
             data_loaded.git = None;
             data_loaded.database = None;
             data_loaded.app_name = Stringy::from(env!("CARGO_PKG_NAME").to_string());
-            
+
             let raw_version: SoftwareVersion = {
                 // defining the version
                 let library_version: Version = aml_version();
-                let software_version: Version = str_to_version(env!("CARGO_PKG_VERSION"), Some(VersionCode::Production));
-                
+                let software_version: Version =
+                    str_to_version(env!("CARGO_PKG_VERSION"), Some(VersionCode::Production));
+
                 SoftwareVersion {
                     application: software_version,
                     library: library_version,
                 }
             };
-                
-            data_loaded.version = serde_json::to_string(&raw_version).unwrap();
-            // ! don't unwrap this.
+
+            data_loaded.version =
+                serde_json::to_string(&raw_version).unwrap_or(SoftwareVersion::dummy().to_string());
 
             data_loaded
         }
@@ -189,7 +193,7 @@ async fn main() {
                       // ? To allow for response sending based on messages getting all the way into the locked array we're implementing the receiver logic here
                         // Read until EOL to get the entire message
                         let mut buffer: Vec<u8> = UnifiedResult::new(
-                            read_until(&mut conn.0, EOL.as_bytes().to_vec())
+                            read_until(&mut conn.0, EOL.to_vec())
                                 .await
                                 .map_err(|err| ErrorArrayItem::from(err)),
                         )
@@ -198,7 +202,7 @@ async fn main() {
                         // Truncate the EOL from the buffer
                         if let Some(pos) = buffer
                             .windows(EOL.len())
-                            .rposition(|window| window == EOL.as_bytes())
+                            .rposition(|window| window == EOL.to_vec())
                         {
                             buffer.truncate(pos);
                         }
@@ -206,11 +210,9 @@ async fn main() {
                         match ProtocolMessage::<Stringy>::from_bytes(&buffer).await {
                             Ok(message) => {
                                 log!(LogLevel::Debug, "Message recieved: {:#?}", message);
-                                // ! Processing the header, We need email data to be sent with SECURE flags over tcp
                                 let header: ProtocolHeader = message.header;
 
                                 if header.flags != Flags::OPTIMIZED.bits() {
-                                    // TODO add a expects function for this
                                     // Preparing a response requesting a resend with a upgrade
 
                                     response.header.status = ProtocolStatus::SIDEGRADE.bits();
@@ -330,7 +332,7 @@ async fn main() {
                         data_loaded.database = None;
                         data_loaded.app_name =
                             Stringy::from(env!("CARGO_PKG_NAME").to_string());
-                        data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
+                        // data_loaded.version = env!("CARGO_PKG_VERSION").to_string();
                         data_loaded
                     }
                     Err(e) => {
