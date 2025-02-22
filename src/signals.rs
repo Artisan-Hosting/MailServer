@@ -1,7 +1,10 @@
 use std::{sync::Arc, thread};
 
-use dusa_collection_utils::{log, log::LogLevel};
-use signal_hook::{consts::{SIGHUP, SIGUSR1}, iterator::Signals};
+use artisan_middleware::dusa_collection_utils::{log, logger::LogLevel};
+use signal_hook::{
+    consts::{SIGHUP, SIGUSR1},
+    iterator::Signals,
+};
 use tokio::sync::Notify;
 
 pub fn reload_monitor(notify: Arc<Notify>) {
@@ -11,7 +14,7 @@ pub fn reload_monitor(notify: Arc<Notify>) {
             log!(LogLevel::Info, "Received SIGHUP, reloading...");
             notify.notify_one();
         }
-    });    
+    });
 }
 
 pub fn shutdown_monitor(notify: Arc<Notify>) {
@@ -21,5 +24,5 @@ pub fn shutdown_monitor(notify: Arc<Notify>) {
             log!(LogLevel::Info, "Received SIGHUP, exiting...");
             notify.notify_one();
         }
-    });    
+    });
 }

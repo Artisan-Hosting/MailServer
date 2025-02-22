@@ -1,14 +1,23 @@
-
-use dusa_collection_utils::{errors::{ErrorArrayItem, Errors}, log::LogLevel, log};
-use lettre::{address::AddressError, transport::smtp::authentication::Credentials, Message, SmtpTransport, Transport};
+use artisan_middleware::dusa_collection_utils::{
+    errors::{ErrorArrayItem, Errors},
+    log,
+    logger::LogLevel,
+};
+use lettre::{
+    address::AddressError, transport::smtp::authentication::Credentials, Message, SmtpTransport,
+    Transport,
+};
 
 use crate::config::AppConfig;
 
-pub fn send_email(config: &AppConfig, subject: String, body: String) -> Result<(), ErrorArrayItem> {
+pub fn send_email(config: &AppConfig, address: String, subject: String, body: String) -> Result<(), ErrorArrayItem> {
     log!(LogLevel::Trace, "Constructing email");
     // Build the email
     let email = Message::builder()
-        .to(config.smtp.to.parse().map_err(|e: AddressError| {
+        .to(address.parse().map_err(|e: AddressError| {
+            ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
+        })?)
+        .bcc(config.smtp.to.parse().map_err(|e: AddressError| {
             ErrorArrayItem::new(Errors::GeneralError, format!("mailer: {}", e.to_string()))
         })?)
         .from(config.smtp.from.parse().map_err(|e: AddressError| {
@@ -21,7 +30,10 @@ pub fn send_email(config: &AppConfig, subject: String, body: String) -> Result<(
         })?;
 
     // The SMTP credentials
-    let creds = Credentials::new(config.smtp.username.to_owned(), config.smtp.password.to_owned());
+    let creds = Credentials::new(
+        config.smtp.username.to_owned(),
+        config.smtp.password.to_owned(),
+    );
 
     let mailer = SmtpTransport::relay("mail.ramfield.net")
         .map_err(|e| {
