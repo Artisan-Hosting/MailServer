@@ -44,7 +44,7 @@ pub fn send_email(config: &AppConfig, address: String, subject: String, body: St
 
     // Send the email
     log!(LogLevel::Trace, "Match statement before sending email");
-    let d = match mailer.send(&email) {
+    match mailer.send(&email) {
         Ok(_) => {
             log!(LogLevel::Info, "Email sent successfully.");
             Ok(())
@@ -56,8 +56,5 @@ pub fn send_email(config: &AppConfig, address: String, subject: String, body: St
                 format!("mailer: {}", e.to_string()),
             ))
         }
-    };
-
-    log!(LogLevel::Trace, "Email processed returning");
-    d
+    }
 }

@@ -1,3 +1,13 @@
+use artisan_middleware::aggregator::Status;
+use artisan_middleware::dusa_collection_utils::errors::{ErrorArrayItem, UnifiedResult};
+use artisan_middleware::dusa_collection_utils::functions::{create_hash, truncate};
+use artisan_middleware::dusa_collection_utils::log;
+use artisan_middleware::dusa_collection_utils::logger::{set_log_level, LogLevel};
+use artisan_middleware::dusa_collection_utils::types::pathtype::PathType;
+use artisan_middleware::dusa_collection_utils::types::rwarc::LockWithTimeout;
+use artisan_middleware::dusa_collection_utils::types::stringy::Stringy;
+use artisan_middleware::dusa_collection_utils::version::{SoftwareVersion, Version, VersionCode};
+use artisan_middleware::state_persistence::{update_state, wind_down_state, AppState, StatePersistence};
 use ::config::{Config, File};
 use artisan_middleware::aggregator::Status;
 use artisan_middleware::dusa_collection_utils::errors::{ErrorArrayItem, UnifiedResult};
@@ -9,9 +19,6 @@ use artisan_middleware::dusa_collection_utils::types::rwarc::LockWithTimeout;
 use artisan_middleware::dusa_collection_utils::types::stringy::Stringy;
 use artisan_middleware::dusa_collection_utils::version::{SoftwareVersion, Version, VersionCode};
 use artisan_middleware::notifications::Email;
-use artisan_middleware::state_persistence::{
-    update_state, wind_down_state, AppState, StatePersistence,
-};
 use artisan_middleware::timestamp::current_timestamp;
 use artisan_middleware::version::aml_version;
 use config::AppConfig;
@@ -63,8 +70,7 @@ async fn main() {
         Ok(config) => config,
         Err(e) => {
             log!(LogLevel::Error, "Failed to load configuration: {}", e);
-            // return;
-            panic!()
+            std::process::exit(0)
         }
     };
 
@@ -199,11 +205,9 @@ async fn main() {
                         match ProtocolMessage::<Stringy>::from_bytes(&buffer).await {
                             Ok(message) => {
                                 log!(LogLevel::Debug, "Message recieved: {:#?}", message);
-                                // ! Processing the header, We need email data to be sent with SECURE flags over tcp
                                 let header: ProtocolHeader = message.header;
 
                                 if header.flags != Flags::OPTIMIZED.bits() {
-                                    // TODO add a expects function for this
                                     // Preparing a response requesting a resend with a upgrade
 
                                     response.header.status = ProtocolStatus::SIDEGRADE.bits();
